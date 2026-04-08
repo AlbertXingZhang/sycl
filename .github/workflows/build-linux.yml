@@ -2,14 +2,14 @@ name: Build LLVM SYCL (Linux)
 
 on:
   schedule:
-    - cron: "0 0 1 * *"
+    - cron: "0 0 * * 0"
   workflow_dispatch:
 
 env:
   SCCACHE_DIR: ${{ github.workspace }}/sccache
   SCCACHE_CACHE_SIZE: 1G
-  X: 13
-  Y: 0
+  X: 12
+  Y: 9
   Z: 1
 
 jobs:
@@ -18,11 +18,11 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ${{ env.SCCACHE_DIR }}
           key: sccache-${{ runner.os }}-${{ github.run_id }}
@@ -30,14 +30,8 @@ jobs:
 
       - name: Install packages
         run: |
-          sudo mkdir --parents --mode=0755 /etc/apt/keyrings
-          wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | \
-            gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
-
-          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main" \
-            | sudo tee --append /etc/apt/sources.list.d/rocm.list
-          echo -e 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600' \
-            | sudo tee /etc/apt/preferences.d/rocm-pin-600
+          wget https://repo.radeon.com/amdgpu-install/latest/ubuntu/noble/amdgpu-install_7.2.1.70201-1_all.deb
+          sudo apt install ./amdgpu-install_7.2.1.70201-1_all.deb
 
           wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
@@ -49,7 +43,12 @@ jobs:
             cuda-nvml-dev-${{ env.X }}-${{ env.Y }}
 
       - name: Checkout LLVM
-        run: git clone --depth 1 https://github.com/intel/llvm -b sycl
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api repos/intel/llvm/releases/latest --jq '.tag_name')
+          echo "Cloning intel/llvm at tag: $tag"
+          git clone --config core.autocrlf=false --depth 1 https://github.com/intel/llvm -b $tag
 
       - name: Configure LLVM
         env:
@@ -57,21 +56,22 @@ jobs:
           CXX: clang++-18
           CUDA_LIB_PATH: /usr/local/cuda/lib64/stubs
         run: |
-          python llvm/buildbot/configure.py --cuda --hip --native_cpu \
-            --cmake-opt=-DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            --cmake-opt=-DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
-            --cmake-opt="-DLLVM_INSTALL_UTILS=ON"
+          python llvm/buildbot/configure.py --hip --cuda --native_cpu \
+            -DLLVM_SPIRV_ENABLE_LIBSPIRV_DIS=off -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            --disable-jit --no-assertions --add_security_flags=sanitize \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=SPIRV
 
       - name: Build LLVM
         run: |
           sccache --start-server
-          python llvm/buildbot/compile.py -j 5
+          python llvm/buildbot/compile.py
           sccache --show-stats
-          cd llvm/build/install
-          tar -czf llvm.tar.gz *
-          LD_LIBRARY_PATH=${{ github.workspace }}/llvm/build/install/lib bin/sycl-ls --verbose
+          LD_LIBRARY_PATH=${{ github.workspace }}/llvm/build/install/lib llvm/build/install/bin/sycl-ls --verbose
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: linux
-          path: llvm/build/install/llvm.tar.gz
+          name: llvm
+          path: llvm/build/install

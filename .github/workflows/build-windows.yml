@@ -2,7 +2,7 @@ name: Build LLVM SYCL (Windows)
 
 on:
   schedule:
-    - cron: "0 0 1 * *"
+    - cron: "0 0 * * 0"
   workflow_dispatch:
 
 env:
@@ -18,11 +18,11 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ${{ env.SCCACHE_DIR }}
           key: sccache-${{ runner.os }}-${{ github.run_id }}
@@ -71,7 +71,7 @@ jobs:
           sccache --show-stats
           llvm/build/install/bin/sycl-ls --verbose
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: windows
+          name: llvm
           path: llvm/build/install
