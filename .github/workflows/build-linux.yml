@@ -1,0 +1,77 @@
+name: Build LLVM SYCL (Linux)
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+env:
+  SCCACHE_DIR: ${{ github.workspace }}/sccache
+  SCCACHE_CACHE_SIZE: 1G
+  X: 13
+  Y: 0
+  Z: 1
+
+jobs:
+  linux-hip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: sccache-${{ runner.os }}-
+
+      - name: Install packages
+        run: |
+          sudo mkdir --parents --mode=0755 /etc/apt/keyrings
+          wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | \
+            gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main" \
+            | sudo tee --append /etc/apt/sources.list.d/rocm.list
+          echo -e 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600' \
+            | sudo tee /etc/apt/preferences.d/rocm-pin-600
+
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+
+          sudo apt-get update
+          sudo apt-get -y install sccache ninja-build rocm-hip-runtime-dev \
+            cuda-minimal-build-${{ env.X }}-${{ env.Y }} \
+            cuda-cupti-dev-${{ env.X }}-${{ env.Y }} \
+            cuda-nvml-dev-${{ env.X }}-${{ env.Y }}
+
+      - name: Checkout LLVM
+        run: git clone --depth 1 https://github.com/intel/llvm -b sycl
+
+      - name: Configure LLVM
+        env:
+          CC: clang-18
+          CXX: clang++-18
+          CUDA_LIB_PATH: /usr/local/cuda/lib64/stubs
+        run: |
+          python llvm/buildbot/configure.py --cuda --hip --native_cpu \
+            --cmake-opt=-DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            --cmake-opt=-DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            --cmake-opt="-DLLVM_INSTALL_UTILS=ON"
+
+      - name: Build LLVM
+        run: |
+          sccache --start-server
+          python llvm/buildbot/compile.py -j 5
+          sccache --show-stats
+          cd llvm/build/install
+          tar -czf llvm.tar.gz *
+          LD_LIBRARY_PATH=${{ github.workspace }}/llvm/build/install/lib bin/sycl-ls --verbose
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: llvm/build/install/llvm.tar.gz

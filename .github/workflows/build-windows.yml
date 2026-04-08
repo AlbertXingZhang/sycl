@@ -1,0 +1,77 @@
+name: Build LLVM SYCL (Windows)
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+env:
+  SCCACHE_DIR: ${{ github.workspace }}/sccache
+  SCCACHE_CACHE_SIZE: 1G
+  X: 12
+  Y: 9
+  Z: 1
+
+jobs:
+  windows-cuda:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: sccache-${{ runner.os }}-
+
+      - name: Install packages
+        shell: pwsh
+        run: |
+          choco install sccache -y
+          Invoke-WebRequest "https://developer.download.nvidia.com/compute/cuda/${{ env.X }}.${{ env.Y }}.${{ env.Z }}/network_installers/cuda_${{ env.X }}.${{ env.Y }}.${{ env.Z }}_windows_network.exe" -OutFile cuda.exe
+          Start-Process -FilePath "cuda.exe" -ArgumentList "-s cudart_${{ env.X }}.${{ env.Y }} nvcc_${{ env.X }}.${{ env.Y }} cupti_${{ env.X }}.${{ env.Y }} nvml_dev_${{ env.X }}.${{ env.Y }}" -Wait -NoNewWindow
+          $CUDA_PATH = Get-ChildItem "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA" | Select-Object -ExpandProperty FullName -Last 1
+          echo "CUDA_PATH=$CUDA_PATH" >> $env:GITHUB_ENV
+          $installationPath = vswhere.exe -prerelease -latest -property installationPath
+          echo "VS_DEV_SHELL=$installationPath/Common7/Tools/Launch-VsDevShell.ps1" >> $env:GITHUB_ENV
+
+      - name: Checkout LLVM
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = gh api repos/intel/llvm/releases/latest --jq '.tag_name'
+          Write-Host "Cloning intel/llvm at tag: $tag"
+          git clone --config core.autocrlf=false --depth 1 https://github.com/intel/llvm -b $tag
+
+      - name: Configure LLVM
+        shell: pwsh
+        run: |
+          & "${{ env.VS_DEV_SHELL }}" -Arch amd64 -HostArch amd64
+          cd ${{ github.workspace }}
+          python llvm/buildbot/configure.py --cuda --native_cpu `
+            -DLLVM_SPIRV_ENABLE_LIBSPIRV_DIS=off -DCMAKE_POSITION_INDEPENDENT_CODE=ON `
+            --disable-jit --no-assertions --add_security_flags=sanitize `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DLLVM_INSTALL_UTILS=ON `
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=SPIRV
+
+      - name: Build LLVM
+        shell: pwsh
+        run: |
+          & "${{ env.VS_DEV_SHELL }}" -Arch amd64 -HostArch amd64
+          cd ${{ github.workspace }}
+          sccache --start-server
+          python llvm/buildbot/compile.py
+          sccache --show-stats
+          llvm/build/install/bin/sycl-ls --verbose
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: llvm/build/install
